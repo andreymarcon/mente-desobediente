@@ -373,6 +373,8 @@ const STATUS = ['ideia','gravar','editar','publicado'];
 let S = null;
 let semanaAtual = null;
 let abaAtual = 'semana';
+let pendente = false;
+const agora = () => new Date().toISOString();
 
 /* ---- atalhos para o conteúdo ---- */
 const G = () => (S && S.guia) || {};
@@ -426,10 +428,81 @@ const slot = (chave, dia, nivel) => (semana(chave).dias[dia]||[]).find(s => s.ni
 function gravaSlot(chave, dia, nivel, dados){
   const arr = semana(chave).dias[dia];
   const i = arr.findIndex(s => s.nivel === nivel);
-  if(dados === null){ if(i>=0) arr.splice(i,1); }
-  else if(i>=0) arr[i] = {...arr[i], ...dados, nivel};
-  else arr.push({nivel, ...dados});
+  const k = chave + '|' + dia + '|' + nivel;
+  S.removidos = S.removidos || {slots:{}, ideias:{}};
+  if(dados === null){
+    if(i>=0) arr.splice(i,1);
+    S.removidos.slots[k] = agora();
+  } else {
+    delete S.removidos.slots[k];
+    const novo = {...(i>=0 ? arr[i] : {}), ...dados, nivel, mod:agora()};
+    if(i>=0) arr[i] = novo; else arr.push(novo);
+  }
   salvar();
+}
+
+/* Une o que está aqui com o que está no repositório, sem que um lado
+   apague o outro. Resolve slot a slot pelo carimbo de modificação. */
+function mesclar(local, remoto){
+  if(!remoto || remoto.novo || !remoto.guia) return local;
+  if(!local || !local.guia) return remoto;
+
+  const tL = local.atualizadoEm || '';
+  const tR = remoto.atualizadoEm || '';
+  const rL = local.removidos || {}, rR = remoto.removidos || {};
+  const rem = {
+    slots:  {...(rR.slots||{}),  ...(rL.slots||{})},
+    ideias: {...(rR.ideias||{}), ...(rL.ideias||{})}
+  };
+
+  const out = JSON.parse(JSON.stringify(remoto));
+  out.guia = (tL > tR && local.guia) ? local.guia : remoto.guia;
+  out.semanas = out.semanas || {};
+
+  Object.keys(local.semanas||{}).forEach(wk => {
+    const wl = local.semanas[wk];
+    if(!out.semanas[wk]) out.semanas[wk] = {dias:{}, nota:wl.nota||''};
+    const wo = out.semanas[wk];
+    wo.dias = wo.dias || {};
+    Object.keys(wl.dias||{}).forEach(dia => {
+      wo.dias[dia] = wo.dias[dia] || [];
+      (wl.dias[dia]||[]).forEach(sl => {
+        const i = wo.dias[dia].findIndex(x => x.nivel === sl.nivel);
+        if(i < 0){ wo.dias[dia].push(sl); return; }
+        const mR = wo.dias[dia][i].mod || tR;
+        const mL = sl.mod || tL;
+        if(mL > mR) wo.dias[dia][i] = sl;
+      });
+    });
+  });
+
+  Object.keys(rem.slots).forEach(k => {
+    const [wk, dia, nivel] = k.split('|');
+    const w = out.semanas[wk];
+    if(!w || !w.dias || !w.dias[dia]) return;
+    const i = w.dias[dia].findIndex(x => x.nivel === nivel);
+    if(i >= 0 && (w.dias[dia][i].mod||'') < rem.slots[k]) w.dias[dia].splice(i,1);
+  });
+
+  const mapa = {};
+  (remoto.ideias||[]).forEach(x => mapa[x.id] = x);
+  (local.ideias||[]).forEach(x => {
+    const a = mapa[x.id];
+    if(!a || (x.mod||x.criadoEm||'') >= (a.mod||a.criadoEm||'')) mapa[x.id] = x;
+  });
+  Object.keys(rem.ideias).forEach(id => {
+    const x = mapa[id];
+    if(x && (x.mod||x.criadoEm||'') < rem.ideias[id]) delete mapa[id];
+  });
+  out.ideias = Object.values(mapa).sort((a,b) => (b.criadoEm||'').localeCompare(a.criadoEm||''));
+
+  const pmap = {};
+  [...(remoto.publicados||[]), ...(local.publicados||[])].forEach(p => pmap[(p.data||'')+'|'+(p.tema||'')] = p);
+  out.publicados = Object.values(pmap);
+
+  out.removidos = rem;
+  out.atualizadoEm = tL > tR ? tL : tR;
+  return out;
 }
 
 /* =========================================================
@@ -438,14 +511,21 @@ function gravaSlot(chave, dia, nivel, dados){
 let syncTimer = null;
 
 function salvar(){
-  S.atualizadoEm = new Date().toISOString();
+  S.atualizadoEm = agora();
   try{ localStorage.setItem(CHAVE, JSON.stringify(S)); }catch(e){}
   render();
   if(gh.ligado()){
+    pendente = true;
     clearTimeout(syncTimer);
-    marcaSync('busy','salvando');
-    syncTimer = setTimeout(() => gh.enviar(), 1400);
+    marcaSync('busy','não enviado');
+    syncTimer = setTimeout(() => gh.enviar(), 800);
   }
+}
+
+/* Se a aba for fechada ou escondida com envio pendente, manda na hora.
+   keepalive faz a requisição sobreviver ao fechamento da página. */
+function descarregar(){
+  if(pendente && gh.ligado()){ clearTimeout(syncTimer); gh.enviar(); }
 }
 function carregarLocal(){
   try{
@@ -476,20 +556,34 @@ const gh = {
     const txt = new TextDecoder().decode(Uint8Array.from(atob(j.content.replace(/\n/g,'')), ch => ch.charCodeAt(0)));
     return JSON.parse(txt);
   },
-  async enviar(){
+  async enviar(retentativa){
     const c = this.cfg(); if(!c) return;
     try{
-      marcaSync('busy','salvando');
-      if(this.sha === null){ try{ await this.ler(); }catch(e){} }
+      marcaSync('busy','enviando');
+      // Traz o que houver de novo no repositório e mistura antes de gravar,
+      // para nunca apagar o que foi escrito do outro lado.
+      let remoto = null;
+      try{ remoto = await this.ler(); }catch(e){}
+      if(remoto && !remoto.novo && remoto.guia){
+        S = mesclar(S, remoto);
+        try{ localStorage.setItem(CHAVE, JSON.stringify(S)); }catch(e){}
+        renderTudo();
+      }
       const bytes = new TextEncoder().encode(JSON.stringify(S,null,2));
       let bin = ''; bytes.forEach(b => bin += String.fromCharCode(b));
-      const body = {message:'sistema: ' + new Date().toISOString(), content:btoa(bin)};
+      const body = {message:'sistema: ' + agora(), content:btoa(bin)};
       if(this.sha) body.sha = this.sha;
-      const r = await fetch(this.url(),
-        {method:'PUT', headers:{Authorization:`Bearer ${c.token}`, Accept:'application/vnd.github+json'}, body:JSON.stringify(body)});
+      const r = await fetch(this.url(), {
+        method:'PUT', keepalive:true,
+        headers:{Authorization:`Bearer ${c.token}`, Accept:'application/vnd.github+json'},
+        body:JSON.stringify(body)
+      });
+      if(r.status === 409 && !retentativa){ this.sha = null; return this.enviar(true); }
+      if(r.status === 403) throw new Error('token sem escrita');
       if(!r.ok) throw new Error('envio ' + r.status);
       const j = await r.json();
       this.sha = j.content.sha;
+      pendente = false;
       marcaSync('ok','sincronizado');
     }catch(e){ marcaSync('err', e.message); }
   },
@@ -497,14 +591,11 @@ const gh = {
     marcaSync('busy','buscando');
     const remoto = await this.ler();
     if(remoto && !remoto.novo && remoto.guia){
-      const rLocal  = (S && S.atualizadoEm) ? Date.parse(S.atualizadoEm) : 0;
-      const rRemoto = remoto.atualizadoEm ? Date.parse(remoto.atualizadoEm) : 0;
-      if(!temConteudo() || rRemoto > rLocal){
-        S = remoto;
-        S.semanas = S.semanas || {}; S.ideias = S.ideias || []; S.publicados = S.publicados || [];
-        try{ localStorage.setItem(CHAVE, JSON.stringify(S)); }catch(e){}
-        return true;
-      }
+      const antes = JSON.stringify(S);
+      S = mesclar(S, remoto);
+      S.semanas = S.semanas || {}; S.ideias = S.ideias || []; S.publicados = S.publicados || [];
+      try{ localStorage.setItem(CHAVE, JSON.stringify(S)); }catch(e){}
+      return JSON.stringify(S) !== antes;
     }
     return false;
   }
@@ -515,8 +606,11 @@ function marcaSync(estado, txt){
   if(!d) return;
   d.className = 'dot ' + (estado||'');
   document.getElementById('syncTxt').textContent = txt || 'local';
-  document.getElementById('rodapeSalvo').textContent =
-    estado === 'ok' ? 'sincronizado no GitHub' : (gh.ligado() ? 'salvando' : 'salvo neste navegador');
+  const rodape = estado === 'ok'  ? 'sincronizado no GitHub'
+               : estado === 'err' ? 'falhou ao enviar, o texto está salvo neste navegador'
+               : pendente         ? 'alterações ainda não enviadas'
+               : gh.ligado()      ? 'verificando' : 'salvo neste navegador';
+  document.getElementById('rodapeSalvo').textContent = rodape;
 }
 
 /* =========================================================
@@ -835,12 +929,17 @@ function abrirIdeia(id){
       formato:o.querySelector('#iFormato').value,
       quadro:o.querySelector('#iQuadro').value
     };
-    if(id) Object.assign(S.ideias.find(x => x.id === id), dados);
-    else S.ideias.unshift({id:'i'+Date.now(), criadoEm:new Date().toISOString(), ...dados});
+    if(id) Object.assign(S.ideias.find(x => x.id === id), dados, {mod:agora()});
+    else S.ideias.unshift({id:'i'+Date.now(), criadoEm:agora(), mod:agora(), ...dados});
     salvar(); fecha();
   };
   const del = o.querySelector('[data-apaga]');
-  if(del) del.onclick = () => { S.ideias = S.ideias.filter(x => x.id !== id); salvar(); fecha(); };
+  if(del) del.onclick = () => {
+    S.removidos = S.removidos || {slots:{}, ideias:{}};
+    S.removidos.ideias[id] = agora();
+    S.ideias = S.ideias.filter(x => x.id !== id);
+    salvar(); fecha();
+  };
   o.querySelector('#iTema').focus();
 }
 
@@ -872,8 +971,10 @@ function agendarIdeia(id){
     const nivel = o.querySelector('#aNivel').value;
     const qq = qById(i.quadro) || QUADROS().find(x => x.nivel === nivel);
     if(!qq){ toast('Sem quadro para esse nível'); return; }
-    gravaSlot(semanaAtual, dia, nivel, {quadro:qq.id, tema:i.tema, hook:i.hook||'', canal:(qq.canais||[])[0]||'', status:'ideia', alcance:false});
+    S.removidos = S.removidos || {slots:{}, ideias:{}};
+    S.removidos.ideias[id] = agora();
     S.ideias = S.ideias.filter(x => x.id !== id);
+    gravaSlot(semanaAtual, dia, nivel, {quadro:qq.id, tema:i.tema, hook:i.hook||'', canal:(qq.canais||[])[0]||'', status:'ideia', alcance:false});
     salvar(); fecha();
     toast('Foi para ' + DIAS_LONGO[dia]);
   };
@@ -999,14 +1100,15 @@ function mostrarGate(texto){
   document.getElementById('gate').hidden = false;
   if(texto) document.getElementById('gateTexto').textContent = texto;
 }
+function renderTudo(){ renderMarca(); renderGuia(); render(); }
+
 function iniciar(){
   document.getElementById('gate').hidden = true;
   document.getElementById('app').hidden = false;
   semanaAtual = semanaAtual || isoSemana(new Date());
-  renderMarca();
-  renderGuia();
-  render();
-  marcaSync(gh.ligado() ? 'ok' : '', gh.ligado() ? 'sincronizado' : 'local');
+  renderTudo();
+  // Nunca dizer "sincronizado" antes de um envio dar certo de verdade.
+  marcaSync(gh.ligado() ? 'busy' : '', gh.ligado() ? 'verificando' : 'local');
 }
 
 document.getElementById('gateBtn').onclick = abrirSync;
@@ -1021,14 +1123,21 @@ document.getElementById('btnCopiarBanco').onclick = () =>
 document.getElementById('btnBriefing').onclick = () =>
   copiar(montaBriefing(), 'Briefing da semana copiado, cole na conversa');
 document.addEventListener('keydown', e => { if(e.key === 'Escape') fecha(); });
+document.addEventListener('visibilitychange', () => { if(document.visibilityState === 'hidden') descarregar(); });
+window.addEventListener('pagehide', descarregar);
+window.addEventListener('beforeunload', e => {
+  if(pendente && gh.ligado()){ descarregar(); e.preventDefault(); e.returnValue = ''; }
+});
 
 (async function boot(){
   carregarLocal();
   if(temConteudo()){
     iniciar();
     if(gh.ligado()){
-      try{ if(await gh.puxar()){ renderMarca(); renderGuia(); render(); toast('Trouxe a versão mais recente'); } marcaSync('ok','sincronizado'); }
-      catch(e){ marcaSync('err', e.message); }
+      try{
+        if(await gh.puxar()){ renderTudo(); toast('Trouxe novidades do repositório'); }
+        if(pendente) await gh.enviar(); else marcaSync('ok','sincronizado');
+      }catch(e){ marcaSync('err', e.message); }
     }
     return;
   }
