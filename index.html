@@ -516,7 +516,20 @@ function mesclar(local, remoto){
   };
 
   const out = JSON.parse(JSON.stringify(remoto));
-  out.guia = (tL > tR && local.guia) ? local.guia : remoto.guia;
+  // o guia mais novo é a base, mas quadros e canais ADICIONADOS do outro
+  // lado nunca se perdem: um navegador com guia velho não desfaz a adição
+  const gBase = (tL > tR && local.guia) ? local.guia : remoto.guia;
+  const gOutro = gBase === local.guia ? remoto.guia : local.guia;
+  out.guia = JSON.parse(JSON.stringify(gBase));
+  ((gOutro && gOutro.quadros) || []).forEach(q => {
+    const meus = out.guia.quadros = out.guia.quadros || [];
+    const j = meus.findIndex(x => x.id === q.id);
+    if(j < 0){ meus.push(JSON.parse(JSON.stringify(q))); return; }
+    (q.canais||[]).forEach(c => {
+      meus[j].canais = meus[j].canais || [];
+      if(!meus[j].canais.includes(c)) meus[j].canais.push(c);
+    });
+  });
 
   // coleta todos os cards dos dois lados, com posição e ordem
   const coleta = (sist, fallback) => {
