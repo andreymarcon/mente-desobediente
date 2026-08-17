@@ -152,6 +152,28 @@ input,textarea,select{font-family:inherit;font-size:inherit;color:inherit}
   color:var(--cinza-claro);font-size:12px;line-height:1;transition:border-color .12s,color .12s
 }
 .add-card:hover{border-color:var(--grafite);color:var(--grafite)}
+.dia-foot{display:flex;gap:5px}
+.dia-foot .add-card{flex:1}
+.dia-foot .add-story{flex:none;width:34px;display:flex;align-items:center;justify-content:center;gap:2px}
+.story{
+  display:flex;align-items:center;gap:6px;padding:4px 7px;border:1px solid var(--linha);
+  border-radius:3px;font-size:10.5px;line-height:1.3;cursor:grab;background:var(--branco);
+  transition:border-color .12s,opacity .12s
+}
+.story:hover{border-color:var(--grafite)}
+.story.arrastando{opacity:.35}
+.ring{
+  width:9px;height:9px;border-radius:50%;border:1.5px solid var(--cinza-claro);flex:none;
+  display:inline-block
+}
+.story.feito{color:var(--cinza-claro)}
+.story.feito .story-txt{text-decoration:line-through}
+.story.feito .ring{border-color:var(--limao);background:var(--limao)}
+.story .story-txt{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.stories-sep{
+  font-family:'JetBrains Mono',monospace;font-size:8px;letter-spacing:.1em;text-transform:uppercase;
+  color:var(--cinza-claro);margin-top:2px
+}
 .dia.drop-alvo{border-color:var(--grafite);box-shadow:0 0 0 1px var(--grafite)}
 .slot.ghost{
   position:fixed;z-index:300;pointer-events:none;background:var(--branco);
@@ -708,9 +730,11 @@ function render(){
   if(abaAtual === 'semana') renderSemana();
   if(abaAtual === 'banco') renderBanco();
   if(abaAtual === 'historico') renderHistorico();
-  const n = Object.values(S.semanas).reduce((a,w) => a + Object.values(w.dias||{}).flat().length, 0);
+  const flat = Object.values(S.semanas).flatMap(w => Object.values(w.dias||{}).flat());
+  const n = flat.filter(c => c.tipo !== 'story').length;
+  const ns = flat.filter(c => c.tipo === 'story').length;
   document.getElementById('rodapeContagem').textContent =
-    n + ' posts planejados · ' + S.ideias.length + ' ideias no banco';
+    n + ' posts planejados · ' + (ns ? ns + ' stories · ' : '') + S.ideias.length + ' ideias no banco';
 }
 
 function renderMarca(){
@@ -771,14 +795,17 @@ function renderGuia(){
 }
 
 function renderPlacar(){
-  const todos = Object.values(semana(semanaAtual).dias).flat();
+  const flat = Object.values(semana(semanaAtual).dias).flat();
+  const todos = flat.filter(s => s.tipo !== 'story');
+  const stories = flat.filter(s => s.tipo === 'story');
   const cont = nv => todos.filter(s => s.nivel === nv && s.tema).length;
   const cel = (v,total,rot) =>
     `<div class="p"><b>${v}${total?`<i>/${total}</i>`:''}</b><span>${rot}</span></div>`;
   document.getElementById('placar').innerHTML =
     NKEYS().map(nv => cel(cont(nv), 7, NIVEIS()[nv].nome)).join('') +
     cel(todos.filter(s => s.alcance && s.tema).length, 7, 'alcance') +
-    cel(todos.filter(s => s.status === 'publicado').length, 0, 'publicados');
+    cel(todos.filter(s => s.status === 'publicado').length, 0, 'publicados') +
+    (stories.length ? cel(stories.filter(s => s.feito).length, stories.length, 'stories') : '');
 }
 
 function renderSemana(){
@@ -789,25 +816,39 @@ function renderSemana(){
   document.getElementById('subSemana').textContent =
     `${fmtDia(datas[0])} a ${fmtDia(datas[6])}. Adicione com o +, arraste entre os dias, clique para editar ou mover de semana. Referência: ${NKEYS().map(n => '1 ' + NIVEIS()[n].nome.toLowerCase()).join(', ')} por dia, um deles com o +1 de alcance.`;
 
-  document.getElementById('grade').innerHTML = DIAS.map((dia,i) => `
+  document.getElementById('grade').innerHTML = DIAS.map((dia,i) => {
+    const todos = w.dias[dia] || [];
+    const cards = todos.filter(c => c.tipo !== 'story');
+    const stories = todos.filter(c => c.tipo === 'story');
+    return `
     <div class="dia${isoDe(datas[i]) === hoje ? ' hoje' : ''}" data-dia="${dia}">
       <div class="dia-head"><b>${DIAS_LONGO[dia]}</b><span class="num">${fmtDia(datas[i])}</span></div>
       <div class="slots" data-dia="${dia}">
-        ${(w.dias[dia]||[]).map(c => cardHTML(c)).join('')}
-        <button class="add-card" data-add="${dia}" title="Adicionar card">+</button>
+        ${cards.map(c => cardHTML(c)).join('')}
+        ${stories.length ? `<span class="stories-sep">stories</span>` : ''}
+        ${stories.map(c => storyHTML(c)).join('')}
+        <div class="dia-foot">
+          <button class="add-card" data-add="${dia}" title="Adicionar card">+</button>
+          <button class="add-card add-story" data-addstory="${dia}" title="Adicionar story"><span class="ring"></span>+</button>
+        </div>
       </div>
-    </div>`).join('');
+    </div>`;
+  }).join('');
 
   const grade = document.getElementById('grade');
-  grade.querySelectorAll('.slot').forEach(el => {
+  grade.querySelectorAll('.slot, .story').forEach(el => {
     el.onclick = () => {
       if(el.dataset.drg){ delete el.dataset.drg; return; } // fim de arrasto, não é clique
-      abrirCard(el.dataset.dia, el.dataset.id);
+      if(el.classList.contains('story')) abrirStory(el.dataset.dia, el.dataset.id);
+      else abrirCard(el.dataset.dia, el.dataset.id);
     };
     el.onpointerdown = e => iniciaArrasto(e, el);
   });
   grade.querySelectorAll('[data-add]').forEach(b => {
     b.onclick = e => { e.stopPropagation(); abrirCard(b.dataset.add, null); };
+  });
+  grade.querySelectorAll('[data-addstory]').forEach(b => {
+    b.onclick = e => { e.stopPropagation(); abrirStory(b.dataset.addstory, null); };
   });
 }
 
@@ -875,6 +916,64 @@ function cardHTML(c){
   </div>`;
 }
 function diaDoCard(id){ const p = achaCard(id); return p ? p.dia : ''; }
+
+function storyHTML(c){
+  return `<div class="story${c.feito ? ' feito' : ''}" data-id="${esc(c.id)}" data-dia="${esc(diaDoCard(c.id))}">
+    <span class="ring"></span><span class="story-txt">${esc(c.tema||'(story)')}</span>
+  </div>`;
+}
+
+function abrirStory(dia, id){
+  const pos = id ? achaCard(id) : null;
+  const s = pos ? pos.card : {};
+  if(pos) dia = pos.dia;
+  const opSemanas = [-1,0,1,2,3,4].map(n => {
+    const wk = deslocaSemana(semanaAtual, n);
+    const rot = n===-1 ? 'semana passada' : n===0 ? 'esta semana' : n===1 ? 'semana que vem' : `em ${n} semanas`;
+    return {wk, rot: rot + '  (' + wk.replace('-W',' sem ') + ')'};
+  });
+  const o = overlay(`
+    <div class="editor" style="max-width:420px">
+      <div class="editor-head"><h3>${id ? 'Story de ' : 'Novo story, '}${DIAS_LONGO[dia]}</h3><button class="fechar" data-x>&times;</button></div>
+      <div class="editor-body">
+        <div class="campo">
+          <label>Story</label>
+          <input id="sTexto" value="${esc(s.tema||'')}" placeholder="O que vai pro story, numa linha">
+        </div>
+        <div class="linha2">
+          <div class="campo"><label>Semana</label>
+            <select id="sSemana">${opSemanas.map(x => `<option value="${x.wk}" ${x.wk===semanaAtual?'selected':''}>${esc(x.rot)}</option>`).join('')}</select>
+          </div>
+          <div class="campo"><label>Dia</label>
+            <select id="sDia">${DIAS.map(d => `<option value="${d}" ${d===dia?'selected':''}>${DIAS_LONGO[d]}</option>`).join('')}</select>
+          </div>
+        </div>
+        <div class="campo">
+          <label class="checkline"><input type="checkbox" id="sFeito" ${s.feito?'checked':''}> Já postei este story</label>
+        </div>
+      </div>
+      <div class="editor-foot">
+        <button class="btn lima" data-salvar>Salvar</button>
+        <button class="btn linha" data-x>Cancelar</button>
+        ${id ? '<button class="btn-del" data-apaga>Excluir</button>' : ''}
+      </div>
+    </div>`);
+  o.querySelector('[data-salvar]').onclick = () => {
+    const texto = o.querySelector('#sTexto').value.trim();
+    if(!texto){ toast('Escreva o story'); return; }
+    const wkAlvo = o.querySelector('#sSemana').value;
+    const diaAlvo = o.querySelector('#sDia').value;
+    const sid = id || ('s' + Date.now() + Math.random().toString(36).slice(2,6));
+    if(id && pos && (wkAlvo !== pos.wk || diaAlvo !== pos.dia)){
+      S.semanas[pos.wk].dias[pos.dia].splice(achaCard(id).i, 1);
+    }
+    gravaCard(wkAlvo, diaAlvo, sid, {tipo:'story', tema:texto, feito:o.querySelector('#sFeito').checked});
+    fecha();
+  };
+  const del = o.querySelector('[data-apaga]');
+  if(del) del.onclick = () => { gravaCard(null, null, id, null); fecha(); };
+  o.querySelector('#sTexto').focus();
+}
 
 function renderBanco(){
   const alvo = document.getElementById('listaIdeias');
@@ -1159,8 +1258,12 @@ function montaBriefing(){
   t += `Tática 3-3-1: ${NKEYS().map(n => '1 ' + NIVEIS()[n].nome.toLowerCase()).join(' + ')} por dia, mais um +1 de alcance.\n\n`;
   DIAS.forEach((d,idx) => {
     t += `## ${DIAS_LONGO[d]} ${fmtDia(datas[idx])}\n`;
-    const cards = (w.dias[d]||[]).filter(x => x.tema);
-    if(!cards.length){ t += `- VAZIO\n\n`; return; }
+    const doDia = (w.dias[d]||[]).filter(x => x.tema);
+    const cards = doDia.filter(x => x.tipo !== 'story');
+    const stories = doDia.filter(x => x.tipo === 'story');
+    if(!cards.length && !stories.length){ t += `- VAZIO\n\n`; return; }
+    if(!cards.length) t += `- VAZIO (só stories)\n`;
+    stories.forEach(s => { t += `- story: ${s.tema}${s.feito ? ' (feito)' : ''}\n`; });
     cards.forEach(s => {
       const q = qById(s.quadro);
       const nv = s.nivel || (q && q.nivel);
