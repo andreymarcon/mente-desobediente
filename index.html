@@ -132,22 +132,31 @@ input,textarea,select{font-family:inherit;font-size:inherit;color:inherit}
   content:'hoje';font-family:'JetBrains Mono',monospace;font-size:8px;letter-spacing:.08em;text-transform:uppercase;
   background:var(--limao);color:var(--grafite);padding:2px 4px;border-radius:2px;margin-left:5px;font-weight:500
 }
-.slots{padding:7px;display:flex;flex-direction:column;gap:6px;flex:1}
+.slots{padding:7px;display:flex;flex-direction:column;gap:6px;flex:1;min-height:70px}
 .slot{
-  border:1px dashed var(--linha-forte);border-radius:4px;padding:7px 8px;cursor:pointer;min-height:62px;
-  display:flex;flex-direction:column;gap:3px;transition:border-color .12s
+  border:1px solid var(--linha-forte);background:var(--nevoa);border-radius:4px;padding:7px 8px;cursor:grab;
+  display:flex;flex-direction:column;gap:3px;transition:border-color .12s, opacity .12s, box-shadow .12s
 }
 .slot:hover{border-color:var(--grafite)}
-.slot.cheio{border-style:solid;background:var(--nevoa)}
+.slot.arrastando{opacity:.35;cursor:grabbing}
 .slot .nivel-tag{
   font-family:'JetBrains Mono',monospace;font-size:8.5px;letter-spacing:.09em;text-transform:uppercase;
   display:flex;align-items:center;gap:4px
 }
 .slot .nivel-tag i{width:5px;height:5px;border-radius:50%;flex:none;font-style:normal}
-.slot .vazio{font-size:10.5px;color:var(--cinza-claro);line-height:1.35;margin-top:2px}
 .slot .quadro-nome{font-size:10px;color:var(--cinza);font-weight:500}
 .slot .tema{font-size:11.5px;font-weight:600;line-height:1.3;word-break:break-word}
 .slot .slot-foot{margin-top:auto;display:flex;align-items:center;gap:4px;flex-wrap:wrap;padding-top:4px}
+.add-card{
+  border:1px dashed var(--linha-forte);border-radius:4px;padding:6px;text-align:center;
+  color:var(--cinza-claro);font-size:12px;line-height:1;transition:border-color .12s,color .12s
+}
+.add-card:hover{border-color:var(--grafite);color:var(--grafite)}
+.dia.drop-alvo{border-color:var(--grafite);box-shadow:0 0 0 1px var(--grafite)}
+.slot.ghost{
+  position:fixed;z-index:300;pointer-events:none;background:var(--branco);
+  box-shadow:0 8px 24px rgba(26,26,26,.25);transform:rotate(1.5deg);opacity:.96
+}
 .st{
   font-family:'JetBrains Mono',monospace;font-size:8.5px;letter-spacing:.06em;text-transform:uppercase;
   padding:2px 5px;border-radius:2px;border:1px solid var(--linha-forte);color:var(--cinza)
@@ -423,65 +432,128 @@ function semana(chave){
   DIAS.forEach(d => { if(!w.dias[d]) w.dias[d] = []; });
   return w;
 }
-const slot = (chave, dia, nivel) => (semana(chave).dias[dia]||[]).find(s => s.nivel === nivel) || null;
 
-function gravaSlot(chave, dia, nivel, dados){
-  const arr = semana(chave).dias[dia];
-  const i = arr.findIndex(s => s.nivel === nivel);
-  const k = chave + '|' + dia + '|' + nivel;
-  S.removidos = S.removidos || {slots:{}, ideias:{}};
-  if(dados === null){
-    if(i>=0) arr.splice(i,1);
-    S.removidos.slots[k] = agora();
-  } else {
-    delete S.removidos.slots[k];
-    const novo = {...(i>=0 ? arr[i] : {}), ...dados, nivel, mod:agora()};
-    if(i>=0) arr[i] = novo; else arr.push(novo);
+/* Dá identidade aos cards antigos (1 slot por nível). O id é derivado da
+   posição original, então dois aparelhos migram para o MESMO id e o merge
+   não duplica nada. */
+function migra(sist){
+  if(!sist) return sist;
+  sist.removidos = sist.removidos || {};
+  sist.removidos.slots = sist.removidos.slots || {};
+  sist.removidos.ideias = sist.removidos.ideias || {};
+  sist.removidos.cards = sist.removidos.cards || {};
+  Object.keys(sist.semanas||{}).forEach(wk => {
+    const w = sist.semanas[wk];
+    Object.keys(w.dias||{}).forEach(dia => {
+      (w.dias[dia]||[]).forEach(c => {
+        if(!c.id) c.id = 'L' + wk + '|' + dia + '|' + (c.nivel||'x');
+      });
+    });
+  });
+  // remoções antigas (por slot) viram remoções do card legado equivalente
+  Object.keys(sist.removidos.slots).forEach(k => {
+    const id = 'L' + k;
+    if(!sist.removidos.cards[id] || sist.removidos.cards[id] < sist.removidos.slots[k])
+      sist.removidos.cards[id] = sist.removidos.slots[k];
+  });
+  return sist;
+}
+
+const achaCard = id => {
+  for(const wk of Object.keys(S.semanas||{})){
+    const w = S.semanas[wk];
+    for(const dia of Object.keys(w.dias||{})){
+      const i = (w.dias[dia]||[]).findIndex(c => c.id === id);
+      if(i >= 0) return {wk, dia, i, card:w.dias[dia][i]};
+    }
   }
+  return null;
+};
+
+function gravaCard(chave, dia, id, dados){
+  S.removidos = migra(S).removidos;
+  if(dados === null){
+    const pos = achaCard(id);
+    if(pos) S.semanas[pos.wk].dias[pos.dia].splice(pos.i, 1);
+    S.removidos.cards[id] = agora();
+    salvar();
+    return;
+  }
+  const arr = semana(chave).dias[dia];
+  const i = arr.findIndex(c => c.id === id);
+  delete S.removidos.cards[id];
+  const novo = {...(i>=0 ? arr[i] : {id}), ...dados, mod:agora()};
+  if(i>=0) arr[i] = novo; else arr.push(novo);
+  salvar();
+}
+
+function moveCard(id, paraWk, paraDia, antesDeId){
+  const pos = achaCard(id);
+  if(!pos) return;
+  const [c] = S.semanas[pos.wk].dias[pos.dia].splice(pos.i, 1);
+  c.mod = agora();
+  const alvo = semana(paraWk).dias[paraDia];
+  let idx = antesDeId ? alvo.findIndex(x => x.id === antesDeId) : -1;
+  if(idx < 0) alvo.push(c); else alvo.splice(idx, 0, c);
   salvar();
 }
 
 /* Une o que está aqui com o que está no repositório, sem que um lado
-   apague o outro. Resolve slot a slot pelo carimbo de modificação. */
+   apague o outro. Resolve card a card pelo carimbo de modificação: o lado
+   com o mod mais novo vence, inclusive na POSIÇÃO (semana e dia) do card. */
 function mesclar(local, remoto){
-  if(!remoto || remoto.novo || !remoto.guia) return local;
-  if(!local || !local.guia) return remoto;
+  if(!remoto || remoto.novo || !remoto.guia) return migra(local);
+  if(!local || !local.guia) return migra(remoto);
+  migra(local); migra(remoto);
 
   const tL = local.atualizadoEm || '';
   const tR = remoto.atualizadoEm || '';
   const rL = local.removidos || {}, rR = remoto.removidos || {};
   const rem = {
     slots:  {...(rR.slots||{}),  ...(rL.slots||{})},
-    ideias: {...(rR.ideias||{}), ...(rL.ideias||{})}
+    ideias: {...(rR.ideias||{}), ...(rL.ideias||{})},
+    cards:  {...(rR.cards||{}),  ...(rL.cards||{})}
   };
 
   const out = JSON.parse(JSON.stringify(remoto));
   out.guia = (tL > tR && local.guia) ? local.guia : remoto.guia;
-  out.semanas = out.semanas || {};
 
-  Object.keys(local.semanas||{}).forEach(wk => {
-    const wl = local.semanas[wk];
-    if(!out.semanas[wk]) out.semanas[wk] = {dias:{}, nota:wl.nota||''};
-    const wo = out.semanas[wk];
-    wo.dias = wo.dias || {};
-    Object.keys(wl.dias||{}).forEach(dia => {
-      wo.dias[dia] = wo.dias[dia] || [];
-      (wl.dias[dia]||[]).forEach(sl => {
-        const i = wo.dias[dia].findIndex(x => x.nivel === sl.nivel);
-        if(i < 0){ wo.dias[dia].push(sl); return; }
-        const mR = wo.dias[dia][i].mod || tR;
-        const mL = sl.mod || tL;
-        if(mL > mR) wo.dias[dia][i] = sl;
+  // coleta todos os cards dos dois lados, com posição e ordem
+  const coleta = (sist, fallback) => {
+    const m = {};
+    Object.keys(sist.semanas||{}).forEach(wk => {
+      Object.keys(sist.semanas[wk].dias||{}).forEach(dia => {
+        (sist.semanas[wk].dias[dia]||[]).forEach((c, i) => {
+          m[c.id] = {card:c, wk, dia, i, mod:c.mod || fallback};
+        });
       });
     });
-  });
+    return m;
+  };
+  const R = coleta(remoto, tR), L = coleta(local, tL);
+  const ids = new Set([...Object.keys(R), ...Object.keys(L)]);
 
-  Object.keys(rem.slots).forEach(k => {
-    const [wk, dia, nivel] = k.split('|');
-    const w = out.semanas[wk];
-    if(!w || !w.dias || !w.dias[dia]) return;
-    const i = w.dias[dia].findIndex(x => x.nivel === nivel);
-    if(i >= 0 && (w.dias[dia][i].mod||'') < rem.slots[k]) w.dias[dia].splice(i,1);
+  out.semanas = {};
+  const notas = {};
+  [remoto, local].forEach(s => Object.keys(s.semanas||{}).forEach(wk => {
+    if(s.semanas[wk].nota) notas[wk] = s.semanas[wk].nota;
+  }));
+
+  ids.forEach(id => {
+    const r = R[id], l = L[id];
+    const win = (l && r) ? ((l.mod||'') >= (r.mod||'') ? l : r) : (l || r);
+    if(rem.cards[id] && (win.card.mod||'') < rem.cards[id]) return; // apagado depois da última edição
+    if(!out.semanas[win.wk]) out.semanas[win.wk] = {dias:{}, nota:notas[win.wk]||''};
+    const w = out.semanas[win.wk];
+    if(!w.dias[win.dia]) w.dias[win.dia] = [];
+    w.dias[win.dia].push({...win.card, _ord:win.i});
+  });
+  Object.values(out.semanas).forEach(w => Object.keys(w.dias).forEach(d => {
+    w.dias[d].sort((a,b) => (a._ord||0) - (b._ord||0));
+    w.dias[d].forEach(c => delete c._ord);
+  }));
+  Object.keys(notas).forEach(wk => {
+    if(!out.semanas[wk]) out.semanas[wk] = {dias:{}, nota:notas[wk]};
   });
 
   const mapa = {};
@@ -536,6 +608,7 @@ function carregarLocal(){
     S.semanas = S.semanas || {};
     S.ideias = S.ideias || [];
     S.publicados = S.publicados || [];
+    migra(S);
   }
 }
 
@@ -701,38 +774,94 @@ function renderSemana(){
   const hoje = hojeISO();
   document.getElementById('wkLabel').textContent = semanaAtual.replace('-W','  sem ');
   document.getElementById('subSemana').textContent =
-    `${fmtDia(datas[0])} a ${fmtDia(datas[6])}. Cada dia pede ${NKEYS().map(n => '1 ' + NIVEIS()[n].nome.toLowerCase()).join(', ')}, e um deles carrega o +1 de alcance.`;
+    `${fmtDia(datas[0])} a ${fmtDia(datas[6])}. Adicione com o +, arraste entre os dias, clique para editar ou mover de semana. Referência: ${NKEYS().map(n => '1 ' + NIVEIS()[n].nome.toLowerCase()).join(', ')} por dia, um deles com o +1 de alcance.`;
 
   document.getElementById('grade').innerHTML = DIAS.map((dia,i) => `
-    <div class="dia${isoDe(datas[i]) === hoje ? ' hoje' : ''}">
+    <div class="dia${isoDe(datas[i]) === hoje ? ' hoje' : ''}" data-dia="${dia}">
       <div class="dia-head"><b>${DIAS_LONGO[dia]}</b><span class="num">${fmtDia(datas[i])}</span></div>
-      <div class="slots">${NKEYS().map(nv => slotHTML(dia, nv, w)).join('')}</div>
+      <div class="slots" data-dia="${dia}">
+        ${(w.dias[dia]||[]).map(c => cardHTML(c)).join('')}
+        <button class="add-card" data-add="${dia}" title="Adicionar card">+</button>
+      </div>
     </div>`).join('');
 
-  document.querySelectorAll('.slot').forEach(el => {
-    el.onclick = () => abrirSlot(el.dataset.dia, el.dataset.nivel);
+  const grade = document.getElementById('grade');
+  grade.querySelectorAll('.slot').forEach(el => {
+    el.onclick = () => {
+      if(el.dataset.drg){ delete el.dataset.drg; return; } // fim de arrasto, não é clique
+      abrirCard(el.dataset.dia, el.dataset.id);
+    };
+    el.onpointerdown = e => iniciaArrasto(e, el);
+  });
+  grade.querySelectorAll('[data-add]').forEach(b => {
+    b.onclick = e => { e.stopPropagation(); abrirCard(b.dataset.add, null); };
   });
 }
 
-function slotHTML(dia, nivel, w){
-  const s = (w.dias[dia]||[]).find(x => x.nivel === nivel);
-  const cfg = NIVEIS()[nivel];
-  const tag = `<span class="nivel-tag" style="color:${cfg.cor}"><i style="background:${cfg.cor}"></i>${esc(cfg.nome)}</span>`;
-  if(!s || !s.tema){
-    return `<div class="slot" data-dia="${dia}" data-nivel="${nivel}">${tag}
-      <span class="vazio">${QUADROS().filter(q => q.nivel === nivel).map(q => esc(q.nome)).join(', ')}</span>
-    </div>`;
+/* Arrasto por pointer events: mouse arrasta entre os dias; no toque,
+   o clique abre o editor, que tem o "mover para" de dia e semana. */
+let drag = null;
+function limpaDrop(){ document.querySelectorAll('.drop-alvo').forEach(x => x.classList.remove('drop-alvo')); }
+function iniciaArrasto(e, el){
+  if(e.pointerType !== 'mouse' || e.button !== 0) return;
+  drag = {id:el.dataset.id, el, x0:e.clientX, y0:e.clientY, on:false};
+  window.addEventListener('pointermove', moveArrasto);
+  window.addEventListener('pointerup', soltaArrasto, {once:true});
+}
+function moveArrasto(e){
+  if(!drag) return;
+  if(!drag.on){
+    if(Math.hypot(e.clientX - drag.x0, e.clientY - drag.y0) < 6) return;
+    drag.on = true;
+    drag.el.classList.add('arrastando');
+    const g = drag.el.cloneNode(true);
+    g.classList.add('ghost');
+    g.style.width = drag.el.offsetWidth + 'px';
+    document.body.appendChild(g);
+    drag.ghost = g;
+    document.body.style.userSelect = 'none';
   }
-  const q = qById(s.quadro);
-  return `<div class="slot cheio" data-dia="${dia}" data-nivel="${nivel}">${tag}
+  drag.ghost.style.left = (e.clientX + 10) + 'px';
+  drag.ghost.style.top = (e.clientY + 8) + 'px';
+  limpaDrop();
+  drag.ghost.style.pointerEvents = 'none';
+  const sob = document.elementFromPoint(e.clientX, e.clientY);
+  const col = sob && sob.closest('.dia');
+  drag.col = col || null;
+  drag.sobre = sob && sob.closest('.slot');
+  if(col) col.classList.add('drop-alvo');
+}
+function soltaArrasto(e){
+  window.removeEventListener('pointermove', moveArrasto);
+  if(!drag) return;
+  const d = drag; drag = null;
+  document.body.style.userSelect = '';
+  if(d.ghost) d.ghost.remove();
+  limpaDrop();
+  d.el.classList.remove('arrastando');
+  if(!d.on) return; // foi só um clique, o onclick abre o editor
+  d.el.dataset.drg = '1';
+  if(d.col && d.col.dataset.dia){
+    const antes = d.sobre && d.sobre.dataset.id !== d.id ? d.sobre.dataset.id : null;
+    moveCard(d.id, semanaAtual, d.col.dataset.dia, antes);
+  }
+}
+
+function cardHTML(c){
+  const q = qById(c.quadro);
+  const nivel = c.nivel || (q && q.nivel);
+  const cfg = NIVEIS()[nivel] || {cor:'#96938A', nome:nivel||''};
+  return `<div class="slot" data-id="${esc(c.id)}" data-dia="${esc(diaDoCard(c.id))}">
+    <span class="nivel-tag" style="color:${cfg.cor}"><i style="background:${cfg.cor}"></i>${esc(cfg.nome)}</span>
     ${q ? `<span class="quadro-nome">${esc(q.nome)}</span>` : ''}
-    <span class="tema">${esc(s.tema)}</span>
+    <span class="tema">${esc(c.tema||'(sem tema)')}</span>
     <span class="slot-foot">
-      <span class="st ${s.status||'ideia'}">${s.status||'ideia'}</span>
-      ${s.alcance ? '<span class="alc">+1</span>' : ''}
+      <span class="st ${c.status||'ideia'}">${c.status||'ideia'}</span>
+      ${c.alcance ? '<span class="alc">+1</span>' : ''}
     </span>
   </div>`;
 }
+function diaDoCard(id){ const p = achaCard(id); return p ? p.dia : ''; }
 
 function renderBanco(){
   const alvo = document.getElementById('listaIdeias');
@@ -806,25 +935,33 @@ function overlay(html){
 }
 function fecha(){ document.querySelectorAll('.overlay').forEach(o => o.remove()); }
 
-function abrirSlot(dia, nivel){
-  const s = slot(semanaAtual, dia, nivel) || {};
-  const cfg = NIVEIS()[nivel];
-  const qs = QUADROS().filter(q => q.nivel === nivel);
-  if(!qs.length){ toast('Nenhum quadro cadastrado nesse nível'); return; }
-  const qSel = qById(s.quadro) || qs[0];
+function abrirCard(dia, id){
+  const pos = id ? achaCard(id) : null;
+  const s = pos ? pos.card : {};
+  if(pos) dia = pos.dia;
+  if(!QUADROS().length){ toast('Nenhum quadro cadastrado'); return; }
+  const qSel = qById(s.quadro) || QUADROS()[0];
+
+  const opSemanas = [-1,0,1,2,3,4].map(n => {
+    const wk = deslocaSemana(semanaAtual, n);
+    const rot = n===-1 ? 'semana passada' : n===0 ? 'esta semana' : n===1 ? 'semana que vem' : `em ${n} semanas`;
+    return {wk, rot: rot + '  (' + wk.replace('-W',' sem ') + ')'};
+  });
 
   const o = overlay(`
     <div class="editor">
       <div class="editor-head">
-        <h3>${DIAS_LONGO[dia]}, ${esc(cfg.nome.toLowerCase())}</h3>
-        <span class="foco" style="color:${cfg.cor}">${esc(cfg.foco||'')}</span>
+        <h3>${id ? 'Card de ' : 'Novo card, '}${DIAS_LONGO[dia]}</h3>
         <button class="fechar" data-x>&times;</button>
       </div>
       <div class="editor-body">
         <div class="campo">
           <label>Quadro</label>
           <div class="radios">
-            ${qs.map(q => `<label><input type="radio" name="q" value="${q.id}" ${q.id===qSel.id?'checked':''}>${esc(q.nome)}</label>`).join('')}
+            ${QUADROS().map(q => {
+              const cor = (NIVEIS()[q.nivel]||{}).cor || '#96938A';
+              return `<label style="border-left:3px solid ${cor}"><input type="radio" name="q" value="${q.id}" ${q.id===qSel.id?'checked':''}>${esc(q.nome)}</label>`;
+            }).join('')}
           </div>
           <p class="dica" id="dicaQuadro"></p>
         </div>
@@ -843,6 +980,14 @@ function abrirSlot(dia, nivel){
             <select id="fStatus">${STATUS.map(st => `<option ${(s.status||'ideia')===st?'selected':''}>${st}</option>`).join('')}</select>
           </div>
         </div>
+        <div class="linha2">
+          <div class="campo"><label>Semana</label>
+            <select id="fSemana">${opSemanas.map(x => `<option value="${x.wk}" ${x.wk===semanaAtual?'selected':''}>${esc(x.rot)}</option>`).join('')}</select>
+          </div>
+          <div class="campo"><label>Dia</label>
+            <select id="fDia">${DIAS.map(d => `<option value="${d}" ${d===dia?'selected':''}>${DIAS_LONGO[d]}</option>`).join('')}</select>
+          </div>
+        </div>
         <div class="campo">
           <label class="checkline"><input type="checkbox" id="fAlcance" ${s.alcance?'checked':''}> Este é o +1 de alcance do dia</label>
         </div>
@@ -850,7 +995,7 @@ function abrirSlot(dia, nivel){
       <div class="editor-foot">
         <button class="btn lima" data-salvar>Salvar</button>
         <button class="btn linha" data-x>Cancelar</button>
-        ${s.tema ? '<button class="btn-del" data-apaga>Esvaziar slot</button>' : ''}
+        ${id ? '<button class="btn-del" data-apaga>Excluir card</button>' : ''}
       </div>
     </div>`);
 
@@ -865,20 +1010,30 @@ function abrirSlot(dia, nivel){
   o.querySelector('[data-salvar]').onclick = () => {
     const tema = o.querySelector('#fTema').value.trim();
     if(!tema){ toast('Escreva o tema antes de salvar'); return; }
-    if(o.querySelector('#fAlcance').checked)
-      semana(semanaAtual).dias[dia].forEach(x => { if(x.nivel !== nivel) x.alcance = false; });
-    gravaSlot(semanaAtual, dia, nivel, {
-      quadro:o.querySelector('input[name=q]:checked').value,
+    const q = qById(o.querySelector('input[name=q]:checked').value);
+    const wkAlvo = o.querySelector('#fSemana').value;
+    const diaAlvo = o.querySelector('#fDia').value;
+    const cardId = id || ('c' + Date.now() + Math.random().toString(36).slice(2,6));
+    const dados = {
+      quadro:q.id,
+      nivel:q.nivel,
       tema,
       hook:o.querySelector('#fHook').value.trim(),
       canal:o.querySelector('#fCanal').value,
       status:o.querySelector('#fStatus').value,
       alcance:o.querySelector('#fAlcance').checked
-    });
+    };
+    if(dados.alcance)
+      semana(wkAlvo).dias[diaAlvo].forEach(x => { if(x.id !== cardId) x.alcance = false; });
+    if(id && pos && (wkAlvo !== pos.wk || diaAlvo !== pos.dia)){
+      S.semanas[pos.wk].dias[pos.dia].splice(achaCard(id).i, 1);
+    }
+    gravaCard(wkAlvo, diaAlvo, cardId, dados);
     fecha();
+    if(wkAlvo !== semanaAtual) toast('Foi para ' + DIAS_LONGO[diaAlvo] + ' da ' + wkAlvo.replace('-W',' sem '));
   };
   const del = o.querySelector('[data-apaga]');
-  if(del) del.onclick = () => { gravaSlot(semanaAtual, dia, nivel, null); fecha(); };
+  if(del) del.onclick = () => { gravaCard(null, null, id, null); fecha(); };
   o.querySelector('#fTema').focus();
 }
 
@@ -959,7 +1114,7 @@ function agendarIdeia(id){
           <div class="campo"><label>Nível</label>
             <select id="aNivel">${NKEYS().map(n => `<option value="${n}" ${n===nivelPad?'selected':''}>${esc(NIVEIS()[n].nome)}</option>`).join('')}</select></div>
         </div>
-        <p class="dica">Vai para a semana ${semanaAtual}. Se o slot já estiver ocupado, o conteúdo é substituído.</p>
+        <p class="dica">Entra como card novo na ${DIAS_LONGO.seg ? 'semana ' + semanaAtual.replace('-W',' sem ') : ''}, junto do que já estiver no dia.</p>
       </div>
       <div class="editor-foot">
         <button class="btn lima" data-salvar>Agendar</button>
@@ -971,11 +1126,12 @@ function agendarIdeia(id){
     const nivel = o.querySelector('#aNivel').value;
     const qq = qById(i.quadro) || QUADROS().find(x => x.nivel === nivel);
     if(!qq){ toast('Sem quadro para esse nível'); return; }
-    S.removidos = S.removidos || {slots:{}, ideias:{}};
+    migra(S);
     S.removidos.ideias[id] = agora();
     S.ideias = S.ideias.filter(x => x.id !== id);
-    gravaSlot(semanaAtual, dia, nivel, {quadro:qq.id, tema:i.tema, hook:i.hook||'', canal:(qq.canais||[])[0]||'', status:'ideia', alcance:false});
-    salvar(); fecha();
+    gravaCard(semanaAtual, dia, 'c' + Date.now() + Math.random().toString(36).slice(2,6),
+      {quadro:qq.id, nivel:qq.nivel, tema:i.tema, hook:i.hook||'', canal:(qq.canais||[])[0]||'', status:'ideia', alcance:false});
+    fecha();
     toast('Foi para ' + DIAS_LONGO[dia]);
   };
 }
@@ -990,15 +1146,14 @@ function montaBriefing(){
   t += `Tática 3-3-1: ${NKEYS().map(n => '1 ' + NIVEIS()[n].nome.toLowerCase()).join(' + ')} por dia, mais um +1 de alcance.\n\n`;
   DIAS.forEach((d,idx) => {
     t += `## ${DIAS_LONGO[d]} ${fmtDia(datas[idx])}\n`;
-    NKEYS().forEach(nv => {
-      const s = (w.dias[d]||[]).find(x => x.nivel === nv);
-      const q = s ? qById(s.quadro) : null;
-      if(s && s.tema){
-        t += `- ${NIVEIS()[nv].nome}: ${s.tema}${q ? ` [${q.nome}, ${s.canal||(q.canais||[])[0]}]` : ''}`
-           + `${s.hook ? `\n  hook: "${s.hook}"` : ''} (${s.status||'ideia'})${s.alcance?' +1 alcance':''}\n`;
-      } else {
-        t += `- ${NIVEIS()[nv].nome}: VAZIO\n`;
-      }
+    const cards = (w.dias[d]||[]).filter(x => x.tema);
+    if(!cards.length){ t += `- VAZIO\n\n`; return; }
+    cards.forEach(s => {
+      const q = qById(s.quadro);
+      const nv = s.nivel || (q && q.nivel);
+      const nomeNivel = (NIVEIS()[nv]||{}).nome || '';
+      t += `- ${nomeNivel ? nomeNivel + ': ' : ''}${s.tema}${q ? ` [${q.nome}, ${s.canal||(q.canais||[])[0]}]` : ''}`
+         + `${s.hook ? `\n  hook: "${s.hook}"` : ''} (${s.status||'ideia'})${s.alcance?' +1 alcance':''}\n`;
     });
     t += `\n`;
   });
@@ -1010,7 +1165,7 @@ function montaBriefing(){
   t += `## Já publicado recentemente, não repetir\n`;
   S.publicados.slice().sort((a,b)=>(b.data||'').localeCompare(a.data||'')).slice(0,8)
     .forEach(p => { t += `- ${p.data} ${p.tema} (${p.metrica||''})\n`; });
-  t += `\nPreencha os slots VAZIOS respeitando o quadro e o canal de cada nível, no meu tom, sem travessão, com hook falável em 3 segundos.`;
+  t += `\nPreencha os dias VAZIOS respeitando o quadro e o canal de cada nível, no meu tom, sem travessão, com hook falável em 3 segundos.`;
   return t;
 }
 
